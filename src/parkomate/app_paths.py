@@ -1,4 +1,4 @@
-"""Where the station keeps its data.
+r"""Where the station keeps its data.
 
 Default data directory:
 
@@ -11,7 +11,6 @@ Override with the ``PARKOMATE_DATA_DIR`` environment variable (tests and develop
 from __future__ import annotations
 
 import os
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -23,7 +22,7 @@ def default_data_dir() -> Path:
     override = os.environ.get(ENV_DATA_DIR)
     if override:
         return Path(override).expanduser()
-    if sys.platform == "win32":
+    if os.name == "nt":
         base = os.environ.get("PROGRAMDATA") or r"C:\ProgramData"
         return Path(base) / "Parkomate"
     return Path.home() / ".parkomate"
@@ -66,7 +65,6 @@ class AppPaths:
 
     def ensure(self) -> AppPaths:
         """Create every directory (idempotent) and return self."""
-        for path in (self.root, self.logs_dir, self.reports_dir, self.outbox_dir,
-                     self.backups_dir):
+        for path in (self.root, self.logs_dir, self.reports_dir, self.outbox_dir, self.backups_dir):
             path.mkdir(parents=True, exist_ok=True)
         return self

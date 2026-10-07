@@ -1,0 +1,149 @@
+# =============================================================================
+# Parkomate Station - settings.toml
+# =============================================================================
+# Location: %PROGRAMDATA%\Parkomate\settings.toml on Windows (~/.parkomate on Linux/macOS).
+# Override with PARKOMATE_SETTINGS=<path> or "python -m parkomate --settings <path>".
+#
+# * Every key is optional; the value shown is the default.
+# * Unknown or misspelt keys are an error: the station refuses to start and names the key.
+# * NEVER put a password, token or API key in this file. Secrets live in the Windows
+#   Credential Manager; *_ref keys only hold the NAME of the entry. Store a secret with:
+#       python -m parkomate secrets set <name>
+# * Admins can edit these settings in the app (Admin > Settings); every change is audited.
+# =============================================================================
+
+# Sent e-mail payload files older than this many days are deleted (database rows are kept).
+retention_days = 90
+
+[station]
+# Name of this bench, printed on reports and e-mails. Letters, digits, "-" and "_" (max 32).
+station_id = "STATION-01"
+# Default UI language for operators who have not chosen one: "en" (English) or "mr" (Marathi).
+language = "en"
+
+[limits]
+# Pass limits. Every range is INCLUSIVE (low <= value <= high). low must be < high.
+# Point A supply voltage (V)
+v_a_low = 23.85
+v_a_high = 24.15
+# Point B voltage (V)
+v_b_low = 4.90
+v_b_high = 5.10
+# Point C voltage (V)
+v_c_low = 3.25
+v_c_high = 3.35
+# Regulator temperature may be at most ambient + temp_margin_c (°C).
+temp_margin_c = 3.0
+# Number of sensor readings the operator takes in Testing (1-10).
+sensor_reading_count = 5
+# Measured values are rounded half-up to this many decimals before comparison (0-6).
+decimals = 2
+
+[timeouts]
+# Communication test (ping) timeout, seconds.
+ping_s = 3.0
+# How long to wait for the measuring device's JSON packet, seconds.
+measurement_s = 30.0
+# Server API (whitelist / firmware) request timeout, seconds.
+api_s = 10.0
+# How long one QR scan attempt waits for a readable code, seconds.
+qr_scan_s = 10.0
+
+[programming]
+# Maximum firmware upload attempts per device, first attempt included (1-10).
+max_retries = 3
+
+[server]
+# Parkomate server. Must be https:// (plain http only for localhost development).
+base_url = "https://api.parkomate.example"
+# API paths (appended to base_url).
+whitelist_path = "/api/v1/devices/whitelist"
+firmware_path = "/api/v1/firmware/latest"
+# NAME of the Credential Manager entry holding the API token (not the token itself).
+api_token_ref = "server_api_token"
+
+[measurement]
+# The app listens here for the measuring device's JSON (POST /measurement).
+listen_host = "0.0.0.0"
+listen_port = 8765
+# Only packets from this IP address are accepted.
+allowed_ip = "192.168.4.2"
+
+[camera]
+# OpenCV camera index of the USB QR camera (0 = first camera).
+index = 0
+# Allow typing the device ID (twice) when the QR cannot be read. Typed IDs are flagged "manual".
+allow_manual_entry = false
+# Regular expression a decoded or typed device ID must match.
+id_pattern = "^[A-Za-z0-9-]{4,32}$"
+
+[email]
+# Send the session summary + report when a session ends.
+enabled = false
+# Who receives the report.
+recipients = []
+# From address.
+sender = ""
+# SMTP server, e.g. "smtp.office365.com" (port 587, starttls) or "smtp.gmail.com".
+host = ""
+port = 587
+# "starttls" (port 587), "ssl" (port 465) or "none" (internal relay, no authentication).
+security = "starttls"
+# "password" (SMTP AUTH) or "oauth2" (XOAUTH2 - Microsoft 365 / Gmail; see ADMIN_GUIDE).
+auth_method = "password"
+# Login name; empty = same as sender.
+username = ""
+# NAME of the Credential Manager entry with the SMTP password.
+password_ref = "smtp_password"
+# NAME of the Credential Manager entry with the OAuth2 access token.
+oauth_token_ref = "smtp_oauth_token"
+# Seconds to wait for the SMTP server.
+timeout_s = 30.0
+# Give up (status "failed", admin can Resend) after this many attempts.
+max_attempts = 10
+# Retry back-off: retry_base_s * 2^(attempt-1), at most retry_max_s seconds.
+retry_base_s = 60.0
+retry_max_s = 3600.0
+# Prefix of the e-mail subject.
+subject_prefix = "[Parkomate]"
+
+[reports]
+# Report files written when a session ends: "xlsx", "csv" or "both".
+format = "xlsx"
+# Language of report headings and of the summary e-mail: "en" or "mr".
+language = "en"
+
+[auth]
+# Wrong passwords before the account is locked.
+max_failed_attempts = 5
+# Lock duration in minutes.
+lockout_minutes = 5.0
+# Minimum password length.
+min_password_length = 6
+
+[ui]
+# Full-screen kiosk mode (no window frame).
+kiosk = false
+# Short sound on reject / complete.
+sound = true
+# Seconds the green "Device complete" banner stays visible.
+success_toast_s = 2.0
+
+[logging]
+# app.log level: "DEBUG", "INFO", "WARNING" or "ERROR". errors.jsonl always gets ERROR+.
+level = "INFO"
+# Size of one log file before it rotates, bytes.
+max_bytes = 5000000
+# Rotated files kept per log.
+backup_count = 5
+
+[dev]
+# Use the simulated bench. Real hardware arrives with the full build.
+use_mock_hardware = true
+# Mock scenario; the PARKOMATE_MOCK_SCENARIO environment variable overrides it. One of:
+# all_pass, upload_fails_then_succeeds, upload_always_fails, whitelist_denied,
+# v_c_out_of_range, temp_too_high, measurement_timeout, qr_unreadable, id_differs,
+# id_write_fails, com_disconnect_mid_flash, comm_fail, camera_missing, mixed
+mock_scenario = "all_pass"
+# Multiplies every simulated delay (0 = instant). PARKOMATE_MOCK_DELAY overrides it.
+mock_delay_scale = 1.0

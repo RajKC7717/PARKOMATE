@@ -57,7 +57,9 @@ class ErrorCode(StrEnum):
     AUTH_DUPLICATE_OPERATOR = "AUTH_DUPLICATE_OPERATOR"
     PERMISSION_DENIED = "PERMISSION_DENIED"
     INVALID_STATE = "INVALID_STATE"
+    INVALID_INPUT = "INVALID_INPUT"
     NOT_FOUND = "NOT_FOUND"
+    ALREADY_RUNNING = "ALREADY_RUNNING"
     UNEXPECTED = "UNEXPECTED"
 
     @property
@@ -114,7 +116,9 @@ _SEVERITY: dict[ErrorCode, Severity] = {
     ErrorCode.AUTH_DUPLICATE_OPERATOR: Severity.WARNING,
     ErrorCode.PERMISSION_DENIED: Severity.WARNING,
     ErrorCode.INVALID_STATE: Severity.ERROR,
+    ErrorCode.INVALID_INPUT: Severity.WARNING,
     ErrorCode.NOT_FOUND: Severity.ERROR,
+    ErrorCode.ALREADY_RUNNING: Severity.ERROR,
     ErrorCode.UNEXPECTED: Severity.CRITICAL,
 }
 
@@ -211,6 +215,8 @@ class SettingsError(ParkomateError):
         context: Mapping[str, Any] | None = None,
     ) -> None:
         self.problems: list[tuple[str, str]] = list(problems or [])
+        self.issues: list[Any] = []
+        """Structured problems (``SettingsIssue``) when produced by validation."""
         super().__init__(message, code=code, params=params, context=context)
 
 
@@ -235,6 +241,12 @@ class RecordStateError(ParkomateError):
     device)."""
 
     default_code = ErrorCode.INVALID_STATE
+
+
+class InputError(ParkomateError):
+    """A value supplied by a person or device has the wrong format (MAC, ID, password...)."""
+
+    default_code = ErrorCode.INVALID_INPUT
 
 
 class NotFoundError(ParkomateError):

@@ -7,6 +7,7 @@ import os
 import threading
 import tomllib
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -31,13 +32,23 @@ SettingsListener = Callable[[Settings, tuple[str, ...]], None]
 
 
 class AuditSink(Protocol):
-    def record(self, operator_id: int | None, action: str, details: Mapping[str, Any]) -> None:
-        ...
+    def record(
+        self, operator_id: int | None, action: str, details: Mapping[str, Any] | None = ...
+    ) -> object: ...
 
 
-def format_validation_error(exc: ValidationError) -> list[tuple[str, str]]:
-    """Turn a pydantic error into ``(dotted.key, problem)`` pairs."""
-    problems: list[tuple[str, str]] = []
+@dataclass(frozen=True, slots=True)
+class SettingsIssue:
+    """One validation problem: dotted key, pydantic error type, its context, English text."""
+
+    key: str
+    type: str
+    ctx: dict[str, Any]
+    message: str
+
+
+def validation_issues(exc: ValidationError) -> list[SettingsIssue]:
+    issues: list[SettingsIssue] = []
     for error in exc.errors():
         loc = ".".join(str(part) for part in error["loc"]) or "(file)"
         message = error["msg"].removeprefix("Value error, ")
@@ -47,8 +58,16 @@ def format_validation_error(exc: ValidationError) -> list[tuple[str, str]]:
             raw = error["input"]
             if not isinstance(raw, dict | list):
                 message = f"{message} (got {raw!r})"
-        problems.append((loc, message))
-    return problems
+        ctx = {k: v for k, v in (error.get("ctx") or {}).items() if not isinstance(v, Exception)}
+        if error["type"] == "range_order":
+            loc = f"{loc}.{ctx['low_key']}"
+        issues.append(SettingsIssue(loc, error["type"], ctx, message))
+    return issues
+
+
+def format_validation_error(exc: ValidationError) -> list[tuple[str, str]]:
+    """Turn a pydantic error into ``(dotted.key, problem)`` pairs."""
+    return [(issue.key, issue.message) for issue in validation_issues(exc)]
 
 
 def validate_settings(data: Mapping[str, Any]) -> Settings:
@@ -56,9 +75,12 @@ def validate_settings(data: Mapping[str, Any]) -> Settings:
     try:
         return Settings.model_validate(dict(data))
     except ValidationError as exc:
-        problems = format_validation_error(exc)
+        issues = validation_issues(exc)
+        problems = [(issue.key, issue.message) for issue in issues]
         detail = "; ".join(f"{key}: {problem}" for key, problem in problems)
-        raise SettingsError(f"invalid settings: {detail}", problems=problems) from exc
+        error = SettingsError(f"invalid settings: {detail}", problems=problems)
+        error.issues = issues
+        raise error from exc
 
 
 def load_settings_file(path: Path) -> Settings:
@@ -180,7 +202,9 @@ class SettingsManager:
         self._notify(listeners, new, changed)
         return new
 
-    def save(self, new: Settings | Mapping[str, Any], actor: Operator) -> dict[str, tuple[Any, Any]]:
+    def save(
+        self, new: Settings | Mapping[str, Any], actor: Operator
+    ) -> dict[str, tuple[Any, Any]]:
         """Validate and persist ``new``. Only admins may save. Returns the changes."""
         if actor.role is not Role.ADMIN or not actor.is_active:
             raise PermissionDeniedError(

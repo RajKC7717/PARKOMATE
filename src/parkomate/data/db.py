@@ -67,7 +67,9 @@ class Database:
                 self._depth -= 1
                 self._rollback(depth, savepoint)
                 if isinstance(exc, sqlite3.Error):
-                    raise DatabaseError(f"database error: {exc}", context={"sqlite": str(exc)}) from exc
+                    raise DatabaseError(
+                        f"database error: {exc}", context={"sqlite": str(exc)}
+                    ) from exc
                 raise
             else:
                 self._depth -= 1

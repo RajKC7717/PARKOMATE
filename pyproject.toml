@@ -15,7 +15,7 @@ dependencies = [
 ]
 
 [project.scripts]
-parkomate = "parkomate.__main__:main"
+parkomate = "parkomate.cli:main"
 
 [dependency-groups]
 dev = [
@@ -89,6 +89,7 @@ select = [
 ignore = [
     "S101",    # assert is fine in tests and for type narrowing
     "S311",    # random is only used by the hardware mock, never for security
+    "S105",    # flags enum names like ALL_PASS / AUTH_WEAK_PASSWORD; secrets live in the keyring
     "RUF001",  # ambiguous unicode chars: we deliberately use ✓ ✕ – °
     "RUF002",
     "RUF003",
@@ -97,7 +98,11 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S105", "S106", "S108", "S603", "S607", "PTH", "N802"]
 "src/parkomate/cli.py" = ["T201"]
+# SQL is assembled only from module-constant column lists / assignments; values are always
+# bound parameters.
+"src/parkomate/data/repositories/**" = ["S608"]
 "src/parkomate/ui/**" = ["N802", "N815"]  # Qt overrides use camelCase (paintEvent, keyPressEvent)
+"src/parkomate/ui/theme/qss.py" = ["E501"]  # one stylesheet rule per line reads best
 
 [tool.ruff.format]
 quote-style = "double"

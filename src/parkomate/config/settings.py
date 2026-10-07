@@ -12,6 +12,7 @@ import re
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic_core import PydanticCustomError
 
 from parkomate.core.enums import MAX_SENSOR_READINGS
 
@@ -56,8 +57,15 @@ class LimitsSettings(_Section):
             low = getattr(self, f"v_{point}_low")
             high = getattr(self, f"v_{point}_high")
             if low >= high:
-                raise ValueError(
-                    f"v_{point}_low ({low}) must be smaller than v_{point}_high ({high})"
+                raise PydanticCustomError(
+                    "range_order",
+                    "{low_key} ({low}) must be smaller than {high_key} ({high})",
+                    {
+                        "low_key": f"v_{point}_low",
+                        "high_key": f"v_{point}_high",
+                        "low": low,
+                        "high": high,
+                    },
                 )
         return self
 
@@ -93,13 +101,15 @@ class ServerSettings(_Section):
             return value
         if re.match(r"^http://(localhost|127\.0\.0\.1)(:\d+)?$", value):
             return value  # local development server only
-        raise ValueError("must start with https:// (plain http is only allowed for localhost)")
+        raise PydanticCustomError(
+            "https_required", "must start with https:// (plain http is only allowed for localhost)"
+        )
 
     @field_validator("whitelist_path", "firmware_path")
     @classmethod
     def _path(cls, value: str) -> str:
         if not value.startswith("/"):
-            raise ValueError("must start with '/'")
+            raise PydanticCustomError("path_slash", "must start with '/'")
         return value
 
 
@@ -114,7 +124,9 @@ class MeasurementSettings(_Section):
         try:
             ipaddress.ip_address(value)
         except ValueError as exc:
-            raise ValueError(f"not a valid IP address: {value!r}") from exc
+            raise PydanticCustomError(
+                "ip_invalid", "not a valid IP address: {value}", {"value": value}
+            ) from exc
         return value
 
 
@@ -131,7 +143,9 @@ class CameraSettings(_Section):
         try:
             re.compile(value)
         except re.error as exc:
-            raise ValueError(f"invalid regular expression: {exc}") from exc
+            raise PydanticCustomError(
+                "regex_invalid", "invalid regular expression: {error}", {"error": str(exc)}
+            ) from exc
         return value
 
 
@@ -159,7 +173,9 @@ class EmailSettings(_Section):
         cleaned = [item.strip() for item in value if item.strip()]
         bad = [item for item in cleaned if not _EMAIL_RE.match(item)]
         if bad:
-            raise ValueError(f"invalid e-mail address(es): {', '.join(bad)}")
+            raise PydanticCustomError(
+                "email_invalid", "invalid e-mail address(es): {values}", {"values": ", ".join(bad)}
+            )
         return cleaned
 
     @field_validator("sender")
@@ -167,7 +183,9 @@ class EmailSettings(_Section):
     def _sender(cls, value: str) -> str:
         value = value.strip()
         if value and not _EMAIL_RE.match(value):
-            raise ValueError(f"invalid e-mail address: {value!r}")
+            raise PydanticCustomError(
+                "email_invalid", "invalid e-mail address(es): {values}", {"values": value}
+            )
         return value
 
     @model_validator(mode="after")
@@ -183,7 +201,11 @@ class EmailSettings(_Section):
                 if not present
             ]
             if missing:
-                raise ValueError(f"e-mail is enabled but {', '.join(missing)} is empty")
+                raise PydanticCustomError(
+                    "email_incomplete",
+                    "e-mail is enabled but {fields} is empty",
+                    {"fields": ", ".join(missing), "keys": [f"email.{m}" for m in missing]},
+                )
         return self
 
     @property

@@ -65,8 +65,7 @@ class HardwareService(Protocol):
         as a new board."""
         ...
 
-    def is_connected(self) -> bool:
-        ...
+    def is_connected(self) -> bool: ...
 
     # -- device identity ----------------------------------------------------------------
     def read_mac(self) -> str:
@@ -105,8 +104,7 @@ class HardwareService(Protocol):
         """Communication test. ``False`` = device did not answer correctly."""
         ...
 
-    def read_sensor(self) -> SensorReading:
-        ...
+    def read_sensor(self) -> SensorReading: ...
 
     def get_device_id(self) -> str:
         """ID stored in the device ("" if none)."""
@@ -129,8 +127,7 @@ class HardwareService(Protocol):
         ...
 
     # -- camera -------------------------------------------------------------------------
-    def open_camera(self) -> None:
-        ...
+    def open_camera(self) -> None: ...
 
     def read_qr(self, timeout_s: float) -> str | None:
         """Decode one QR code. ``None`` when nothing readable was seen within the timeout."""
@@ -141,8 +138,7 @@ class HardwareService(Protocol):
         polled from the UI thread at ~15 fps)."""
         ...
 
-    def close_camera(self) -> None:
-        ...
+    def close_camera(self) -> None: ...
 
     # -- lifecycle ----------------------------------------------------------------------
     def shutdown(self) -> None:
@@ -187,15 +183,13 @@ class WorkflowService(Protocol):
         ...
 
     # -- checks -------------------------------------------------------------------------
-    def required_checks(self, stage: Stage) -> list[CheckCode]:
-        ...
+    def required_checks(self, stage: Stage) -> list[CheckCode]: ...
 
     def missing_checks(self) -> list[CheckCode]:
         """Required checks of the current stage that have not passed yet (gate message)."""
         ...
 
-    def is_stage_complete(self, stage: Stage) -> bool:
-        ...
+    def is_stage_complete(self, stage: Stage) -> bool: ...
 
     def submit_check(
         self, check_code: CheckCode, value: CheckValue = None, *, text: str | None = None
@@ -218,14 +212,17 @@ class WorkflowService(Protocol):
         packaging). Raises ``INVALID_STATE`` when the gate is not satisfied."""
         ...
 
-    def reject(self, check_code: CheckCode, reason_key: str = "reject.reason.manual",
-               **reason_params: object) -> RejectInstruction:
+    def reject(
+        self,
+        check_code: CheckCode,
+        reason_key: str = "reject.reason.manual",
+        **reason_params: object,
+    ) -> RejectInstruction:
         """Operator-initiated reject at the current stage for ``check_code``."""
         ...
 
     # -- programming --------------------------------------------------------------------
-    def can_retry_programming(self) -> bool:
-        ...
+    def can_retry_programming(self) -> bool: ...
 
     # -- testing ------------------------------------------------------------------------
     def evaluate_measurement(self, measurement: Measurement) -> list[CheckOutcome]:
