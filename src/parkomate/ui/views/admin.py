@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Sequence
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any, Literal, cast, get_args, get_origin
@@ -12,6 +13,7 @@ from PySide6.QtCore import QDate, Qt, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QAbstractSpinBox,
     QCheckBox,
     QComboBox,
     QDateEdit,
@@ -38,13 +40,15 @@ from parkomate.config.settings import Settings
 from parkomate.core.enums import Role
 from parkomate.core.errors import ErrorCode, ParkomateError, SettingsError
 from parkomate.core.models import Operator
-from parkomate.i18n import t, translator
+from parkomate.i18n import LANGUAGES, t, translator
 from parkomate.logging_setup import read_error_log
 from parkomate.ui.components.widgets import BigButton, InlineConfirm, TrLabel, card, set_prop
 from parkomate.ui.qt_i18n import error_cause, error_title, language_notifier
 from parkomate.ui.theme.fonts import font
 from parkomate.ui.theme.tokens import SIZES
 from parkomate.ui.viewmodels.station import StationController
+
+log = logging.getLogger(__name__)
 
 Editor = QCheckBox | QSpinBox | QDoubleSpinBox | QComboBox | QLineEdit
 
@@ -215,6 +219,7 @@ class SettingsTab(QWidget):
             return QCheckBox()
         if annotation is int:
             spin = QSpinBox()
+            spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
             spin.setRange(
                 int(low if low is not None else -1_000_000),
                 int(high if high is not None else 1_000_000_000),
@@ -222,6 +227,7 @@ class SettingsTab(QWidget):
             return spin
         if annotation is float:
             dspin = QDoubleSpinBox()
+            dspin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
             dspin.setDecimals(3)
             dspin.setSingleStep(0.01)
             dspin.setRange(
@@ -232,7 +238,8 @@ class SettingsTab(QWidget):
         if get_origin(annotation) is Literal:
             combo = QComboBox()
             for option in get_args(annotation):
-                combo.addItem(str(option), option)
+                label = t(f"language.{option}") if option in LANGUAGES else str(option)
+                combo.addItem(label, option)
             return combo
         return QLineEdit()
 
@@ -511,6 +518,10 @@ class OperatorsTab(QWidget):
         except ParkomateError as exc:
             self.result.fail(exc)
             return
+        except Exception as exc:  # never let an admin action crash the station
+            log.exception("operator admin action failed")
+            self.result.fail(ParkomateError(str(exc), code=ErrorCode.UNEXPECTED))
+            return
         self.result.ok(t(ok_key, **params))
         self.refresh()
 
@@ -563,7 +574,7 @@ class OperatorsTab(QWidget):
             self.result.info(t("admin.op.passwords_differ"))
             return
         code, name = self.new_code.text(), self.new_name.text()
-        role = self.new_role.currentData()
+        role = Role(self.new_role.currentData())  # Qt hands enum data back as str
         password = self.new_pw.text()
         self._run(
             lambda a: self.c.ctx.auth.create_operator(a, code, name, password, role),
@@ -1003,4 +1014,4 @@ class AdminView(QWidget):
 
     def retranslate(self, *_args: object) -> None:
         for index, key in enumerate(self.TABS):
-            self.tabs.setTabText(index, t(key))
+            self.tabs.setTabText(index, t(key).replace("&", "&&"))  # '&' is not a mnemonic

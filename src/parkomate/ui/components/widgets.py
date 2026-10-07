@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QAbstractButton,
     QButtonGroup,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -444,6 +445,32 @@ class InlineConfirm(QFrame):
         self.no_button.set_text_key(no_key)
         self.yes_button.set_variant("danger" if danger else "primary")
         self.setVisible(True)
+
+
+class ValueRow:
+    """One row of a check table: name | measured value | allowed range | PASS/FAIL pill.
+
+    Not a widget itself: it places its four widgets in a shared ``QGridLayout`` row so the
+    columns of every row line up.
+    """
+
+    def __init__(self, grid: QGridLayout, row: int, name_key: str) -> None:
+        self.name = TrLabel(name_key)
+        self.name.setFont(font(SIZES.font_base))
+        self.measured = QLabel("-")
+        self.measured.setFont(font(SIZES.font_h2, bold=True))
+        self.allowed = QLabel()
+        self.allowed.setWordWrap(True)
+        self.allowed.setFont(font(SIZES.font_small))
+        self.pill = StatusPill()
+        for column, widget in enumerate((self.name, self.measured, self.allowed, self.pill)):
+            grid.addWidget(widget, row, column)
+
+    def set_value(self, measured: str | None, allowed: str, state: str) -> None:
+        self.measured.setText(measured or "-")
+        self.allowed.setText(allowed)
+        self.pill.set_state(state)
+        self.measured.setAccessibleName(f"{self.name.text()}: {self.measured.text()}")
 
 
 def card(

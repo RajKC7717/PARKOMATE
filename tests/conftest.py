@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import tempfile
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -13,6 +14,9 @@ from argon2 import PasswordHasher
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ["PARKOMATE_MOCK_DELAY"] = "0"
 os.environ.pop("PARKOMATE_MOCK_SCENARIO", None)
+os.environ.pop("PARKOMATE_SETTINGS", None)
+# Safety net: nothing in the test run may ever touch the real station data folder.
+os.environ["PARKOMATE_DATA_DIR"] = tempfile.mkdtemp(prefix="parkomate-tests-")
 
 from parkomate.auth.service import AuthService
 from parkomate.config.settings import Settings

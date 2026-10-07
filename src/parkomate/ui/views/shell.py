@@ -508,6 +508,8 @@ class ProductionShell(QWidget):
             view.update_view()
         self._refresh_bars()
         self.bottom.refresh()
+        if self.c.reject is None and self.bottom.primary.isEnabled():
+            self.bottom.primary.setFocus()
 
     def _refresh_bars(self, *_args: object) -> None:
         if self.c.page is not Page.PRODUCTION and self.c.page is not Page.ADMIN:

@@ -178,8 +178,9 @@ def test_reports_and_outbox_tab(driver: StationDriver) -> None:
     message["Subject"] = "Report"
     message.set_content("x")
     item = d.ctx.outbox.enqueue(message, None)
-    d.ctx.repos.outbox.mark_attempt_failed(item.id, "MAIL_FAILED: down", next_attempt_at=None,
-                                           give_up=True)
+    d.ctx.repos.outbox.mark_attempt_failed(
+        item.id, "MAIL_FAILED: down", next_attempt_at=None, give_up=True
+    )
     tab.refresh()
     assert tab.outbox.item(0, 3).text() == "Failed"
     tab._resend()
@@ -199,6 +200,7 @@ def test_counters_tab_reset(driver: StationDriver) -> None:
     d.full_device()
     _open_admin(d)
     tab = d.window.admin.counters_tab
+    d.window.admin.tabs.setCurrentWidget(tab)
     tab.refresh()
     assert "Completed 1" in tab.values.text()
     tab.reset.click()
@@ -252,12 +254,10 @@ def test_admin_language_switch(driver: StationDriver) -> None:
 
 
 def test_settings_issue_text_fallback() -> None:
-    class Issue:
-        type = "something_new"
-        ctx: dict[str, object] = {}
-        message = "raw detail"
+    from parkomate.config.manager import SettingsIssue
 
-    assert settings_issue_text(Issue()) == "Invalid value: raw detail"
+    issue = SettingsIssue("x.y", "something_new", {}, "raw detail")
+    assert settings_issue_text(issue) == "Invalid value: raw detail"
 
 
 def test_worker_wraps_unexpected_exceptions(qapp: object) -> None:

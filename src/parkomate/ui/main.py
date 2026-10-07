@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import sys
+from types import TracebackType
 
 from PySide6.QtCore import QLockFile
 from PySide6.QtWidgets import QApplication
@@ -31,8 +32,20 @@ def create_application(argv: list[str] | None = None) -> QApplication:
     return app
 
 
+def _log_unhandled(
+    exc_type: type[BaseException], exc: BaseException, tb: TracebackType | None
+) -> None:
+    """Exceptions escaping a Qt slot are logged (errors.jsonl) instead of being lost."""
+    log.critical(
+        "unhandled exception in the UI",
+        exc_info=(exc_type, exc, tb),
+        extra={"error_code": "UNEXPECTED"},
+    )
+
+
 def run_ui(*, mock: bool | None = None, kiosk: bool = False) -> int:
     app = create_application()
+    sys.excepthook = _log_unhandled
     paths = AppPaths.default().ensure()
 
     lock = QLockFile(str(paths.root / "station.lock"))

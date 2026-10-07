@@ -18,7 +18,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from parkomate.core.enums import CheckCode, IdentityStatus, IdEntryMethod, Stage
+from parkomate.core.enums import (
+    MAX_SENSOR_READINGS,
+    CheckCode,
+    IdentityStatus,
+    IdEntryMethod,
+    Stage,
+)
 from parkomate.core.models import CheckOutcome
 from parkomate.i18n import t
 from parkomate.ui.components.icons import Icon
@@ -28,6 +34,7 @@ from parkomate.ui.components.widgets import (
     CounterBadge,
     StatusPill,
     TrLabel,
+    ValueRow,
     scroll_card,
     set_prop,
 )
@@ -371,10 +378,17 @@ class TestingView(StageView):
         self.step_sensor = StepRow("B2", "test.step.sensor")
         self.reading_title = QLabel()
         self.reading_title.setFont(font(SIZES.font_h2, bold=True))
-        self.readings = QLabel()
-        self.readings.setFont(font(SIZES.font_h2))
         self.step_sensor.body.addWidget(self.reading_title)
-        self.step_sensor.body.addWidget(self.readings)
+        readings = QGridLayout()
+        readings.setHorizontalSpacing(SIZES.space_l)
+        readings.setVerticalSpacing(0)
+        self.reading_labels: list[QLabel] = []
+        for index in range(MAX_SENSOR_READINGS):
+            label = QLabel()
+            label.setFont(font(SIZES.font_base))
+            readings.addWidget(label, index // 2, index % 2)
+            self.reading_labels.append(label)
+        self.step_sensor.body.addLayout(readings)
         left.addWidget(self.step_sensor)
         self.sensor_row = DecisionRow(
             CheckCode.B2_SENSOR_OK, "test.mark.sensor", "test.mark.sensor_help", self.vm
@@ -398,22 +412,9 @@ class TestingView(StageView):
             header = TrLabel(key, role="small")
             header.setFont(font(SIZES.font_small, bold=True))
             grid.addWidget(header, 0, col)
-        self.cells: dict[CheckCode, tuple[TrLabel, QLabel, QLabel, StatusPill]] = {}
-        for row, code in enumerate(self.ROWS, start=1):
-            name = TrLabel(code.label_key)
-            name.setWordWrap(True)
-            name.setFont(font(SIZES.font_base))
-            measured = QLabel("-")
-            measured.setFont(font(SIZES.font_h2, bold=True))
-            allowed = QLabel()
-            allowed.setWordWrap(True)
-            allowed.setFont(font(SIZES.font_small))
-            pill = StatusPill()
-            grid.addWidget(name, row, 0)
-            grid.addWidget(measured, row, 1)
-            grid.addWidget(allowed, row, 2)
-            grid.addWidget(pill, row, 3)
-            self.cells[code] = (name, measured, allowed, pill)
+        self.cells: dict[CheckCode, ValueRow] = {
+            code: ValueRow(grid, row, code.label_key) for row, code in enumerate(self.ROWS, start=1)
+        }
         right.addLayout(grid)
         self.waiting = QLabel()
         self.waiting.setFont(font(SIZES.font_h2, bold=True))
@@ -474,29 +475,36 @@ class TestingView(StageView):
             sensor_state = StepState.FAIL
         self.step_sensor.set_state(sensor_state)
         self.reading_title.setText(t("test.reading_progress", n=count, total=total))
-        values = [f"{reading.value:g}" for reading in vm.readings]
-        values += ["-"] * (total - count)
-        unit = vm.readings[0].unit if vm.readings else ""
-        self.readings.setText(f"{'  ·  '.join(values)}  {unit}")
-        if vm.readings:
-            self.readings.setToolTip(local_time(vm.readings[-1].read_at))
+        for index, label in enumerate(self.reading_labels):
+            label.setVisible(index < total)
+            if index < count:
+                reading = vm.readings[index]
+                label.setText(
+                    f"{index + 1}.  {reading.value:g} {reading.unit}   "
+                    f"{local_time(reading.read_at)}"
+                )
+            else:
+                label.setText(f"{index + 1}.  -")
         comm_ok = vm.comm_state is StepState.PASS
         self.sensor_row.update_view(comm_ok and vm.readings_done)
         self.indicator_row.update_view(comm_ok)
         # B3
         results: dict[CheckCode, CheckOutcome] = {o.check_code: o for o in vm.results}
-        for code, (_name, measured, allowed, pill) in self.cells.items():
-            allowed.setText(self._allowed_text(code))
+        for code, value_row in self.cells.items():
             outcome = results.get(code)
             if outcome is None or outcome.value_num is None:
-                measured.setText("-")
-                pill.set_state("working" if vm.measure_state is StepState.WORKING else "pending")
+                working = vm.measure_state is StepState.WORKING
+                value_row.set_value(
+                    None, self._allowed_text(code), "working" if working else "pending"
+                )
             else:
                 unit = "°C" if code is CheckCode.B3_T_REG else "V"
-                measured.setText(f"{outcome.value_num:g} {unit}")
-                pill.set_state("pass" if outcome.passed else "fail")
-                if outcome.passed is None:
-                    pill.set_state("pending")
+                state = (
+                    "pending" if outcome.passed is None else ("pass" if outcome.passed else "fail")
+                )
+                value_row.set_value(
+                    f"{outcome.value_num:g} {unit}", self._allowed_text(code), state
+                )
         elec_state = vm.measure_state
         self.step_elec.set_state(elec_state)
         if vm.measure_state is StepState.WORKING:

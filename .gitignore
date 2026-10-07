@@ -1,0 +1,22 @@
+# Python / tooling
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# Local station data (never commit production data or secrets)
+*.db
+*.db-wal
+*.db-shm
+settings.toml
+!config/settings.example.toml
+outbox/
+reports/
+logs/
