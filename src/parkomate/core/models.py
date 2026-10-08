@@ -121,6 +121,16 @@ class CheckResult(_Frozen):
     created_at: datetime
 
 
+class StageTransition(_Frozen):
+    """One recorded move of a device between stages (``from_stage`` None = device started)."""
+
+    id: int
+    device_row_id: int
+    from_stage: Stage | None
+    to_stage: Stage
+    created_at: datetime
+
+
 class CounterEventRecord(_Frozen):
     id: int
     session_id: int
@@ -298,6 +308,12 @@ class RejectInstruction(_Frozen):
     reason_key: str
     reason_params: dict[str, Any] = Field(default_factory=dict)
     message_key: str = "reject.place_in_box"
+    value_num: float | None = None
+    """Measured value that failed (when the check has one)."""
+    value_text: str | None = None
+    unit: str | None = None
+    limit_low: float | None = None
+    limit_high: float | None = None
 
     @property
     def box_letter(self) -> str:

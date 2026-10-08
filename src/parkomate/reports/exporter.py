@@ -126,6 +126,14 @@ class ReportExporter:
                 }
                 for c in checks
             ],
+            "transitions": [
+                {
+                    "from": t.from_stage.value if t.from_stage else None,
+                    "to": t.to_stage.value,
+                    "time": local_iso(t.created_at),
+                }
+                for t in self._repos.transitions.list_for_device(device_row_id)
+            ],
             "counter_events": [
                 {"event": e.event.value, "time": local_iso(e.created_at)}
                 for e in self._repos.counters.list_for_device(device_row_id)

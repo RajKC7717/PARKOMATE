@@ -81,9 +81,44 @@ class TimeoutSettings(_Section):
     qr_scan_s: PositiveFloat = 10.0
 
 
+class SerialSettings(_Section):
+    """Text link to the firmware running on the board (PING, READ_SENSOR, GET_ID, SET_ID...)."""
+
+    baud: int = Field(default=115200, ge=1200, le=3_000_000)
+    command_timeout_s: PositiveFloat = 2.0
+    """Wait for one reply line (the communication test uses ``timeouts.ping_s``)."""
+    command_retries: int = Field(default=2, ge=0, le=10)
+    boot_wait_s: float = Field(default=4.0, ge=0, le=60)
+    """After flashing / reset the firmware needs this long before it answers."""
+    mac_source: Literal["esptool", "link"] = "esptool"
+    """Read the MAC from the ROM bootloader (works on blank boards) or ask the firmware."""
+    port_check_s: float = Field(default=2.0, ge=0.5, le=60)
+    """How often the station checks that the board's USB port is still present."""
+
+
 class ProgrammingSettings(_Section):
     max_retries: int = Field(default=3, ge=1, le=10)
     """Maximum upload attempts per device (first attempt included)."""
+    flash_baud: int = Field(default=460800, ge=9600, le=3_000_000)
+    connect_mode: Literal["default_reset", "no_reset", "usb_reset"] = "default_reset"
+    """``no_reset`` for boards without auto-reset: the operator holds BOOT (screen tells them)."""
+    app_offset: int = Field(default=0x10000, ge=0)
+    """Flash address of a single application image (server sends one .bin)."""
+    bootloader_offset: int = Field(default=0x1000, ge=0)
+    """Used when the server manifest lists a ``bootloader`` without its own offset
+    (0x1000 for ESP32, 0x0 for ESP32-S3/C3)."""
+    partitions_offset: int = Field(default=0x8000, ge=0)
+    erase_all: bool = False
+    """Erase the whole flash before writing (slower; clears stored settings/IDs)."""
+
+    def offset_for(self, image_name: str) -> int | None:
+        return {
+            "bootloader": self.bootloader_offset,
+            "partitions": self.partitions_offset,
+            "partition-table": self.partitions_offset,
+            "app": self.app_offset,
+            "firmware": self.app_offset,
+        }.get(image_name.lower())
 
 
 class ServerSettings(_Section):
@@ -92,6 +127,12 @@ class ServerSettings(_Section):
     firmware_path: str = "/api/v1/firmware/latest"
     api_token_ref: str = Field(default="server_api_token", pattern=_SECRET_REF_RE)
     """Name of the keyring entry holding the API token (never the token itself)."""
+    verify_tls: bool = True
+    """Never switch off in production."""
+    ca_bundle: str = ""
+    """Optional path to a company CA certificate bundle (empty = system/certifi)."""
+    retries: int = Field(default=3, ge=0, le=10)
+    """Extra attempts for network errors and HTTP 5xx (with back-off)."""
 
     @field_validator("base_url")
     @classmethod
@@ -117,6 +158,17 @@ class MeasurementSettings(_Section):
     listen_host: str = "0.0.0.0"  # noqa: S104 - the measurement device is on the bench LAN
     listen_port: int = Field(default=8765, ge=1, le=65535)
     allowed_ip: str = "192.168.4.2"
+    path: str = "/measurement"
+    """HTTP path the measuring device POSTs its JSON to."""
+    ambient_timeout_s: PositiveFloat = 20.0
+    """Wait for a packet carrying ``t_amb_c`` when measuring ambient temperature."""
+
+    @field_validator("path")
+    @classmethod
+    def _path(cls, value: str) -> str:
+        if not value.startswith("/"):
+            raise PydanticCustomError("path_slash", "must start with '/'")
+        return value
 
     @field_validator("listen_host", "allowed_ip")
     @classmethod
@@ -136,6 +188,11 @@ class CameraSettings(_Section):
     """Allow typing the QR ID (twice) when the camera cannot read it. Flagged as manual."""
     id_pattern: str = r"^[A-Za-z0-9-]{4,32}$"
     """Regular expression a decoded / typed device ID must match."""
+    backend: Literal["auto", "dshow", "msmf", "any"] = "auto"
+    """OpenCV capture backend; ``auto`` = DirectShow on Windows."""
+    width: int = Field(default=1280, ge=160, le=4096)
+    height: int = Field(default=720, ge=120, le=4096)
+    fps: int = Field(default=15, ge=1, le=60)
 
     @field_validator("id_pattern")
     @classmethod
@@ -239,9 +296,34 @@ class LoggingSettings(_Section):
     backup_count: int = Field(default=5, ge=1, le=50)
 
 
+RETRIABLE_CHECKS: tuple[str, ...] = ("A_UPLOAD", "B1_COMM", "B3_ELECTRICAL")
+
+
+class WorkflowSettings(_Section):
+    retriable_checks: list[str] = Field(default_factory=lambda: ["A_UPLOAD"])
+    """Failures that allow another try instead of an immediate reject. Allowed values:
+    A_UPLOAD (firmware upload), B1_COMM (communication test), B3_ELECTRICAL (measurement)."""
+    max_attempts: int = Field(default=3, ge=1, le=10)
+    """Attempts for B1_COMM / B3_ELECTRICAL when retriable (upload uses
+    ``programming.max_retries``)."""
+
+    @field_validator("retriable_checks")
+    @classmethod
+    def _known(cls, value: list[str]) -> list[str]:
+        cleaned = [item.strip().upper() for item in value if item.strip()]
+        bad = [item for item in cleaned if item not in RETRIABLE_CHECKS]
+        if bad:
+            raise PydanticCustomError(
+                "literal_error",
+                "unknown check(s) {values}; expected {expected}",
+                {"values": ", ".join(bad), "expected": ", ".join(RETRIABLE_CHECKS)},
+            )
+        return list(dict.fromkeys(cleaned))
+
+
 class DevSettings(_Section):
-    use_mock_hardware: bool = True
-    """Prompt 1/2 only ship mocks. Real hardware arrives with the full build."""
+    use_mock_hardware: bool = False
+    """Simulated bench instead of real hardware (also ``--mock`` on the command line)."""
     mock_scenario: str = "all_pass"
     """Overridden by the PARKOMATE_MOCK_SCENARIO environment variable."""
     mock_delay_scale: float = Field(default=1.0, ge=0, le=10)
@@ -257,12 +339,14 @@ class Settings(BaseModel):
     station: StationSettings = Field(default_factory=StationSettings)
     limits: LimitsSettings = Field(default_factory=LimitsSettings)
     timeouts: TimeoutSettings = Field(default_factory=TimeoutSettings)
+    serial: SerialSettings = Field(default_factory=SerialSettings)
     programming: ProgrammingSettings = Field(default_factory=ProgrammingSettings)
     server: ServerSettings = Field(default_factory=ServerSettings)
     measurement: MeasurementSettings = Field(default_factory=MeasurementSettings)
     camera: CameraSettings = Field(default_factory=CameraSettings)
     email: EmailSettings = Field(default_factory=EmailSettings)
     reports: ReportsSettings = Field(default_factory=ReportsSettings)
+    workflow: WorkflowSettings = Field(default_factory=WorkflowSettings)
     auth: AuthSettings = Field(default_factory=AuthSettings)
     ui: UiSettings = Field(default_factory=UiSettings)
     logging: LoggingSettings = Field(default_factory=LoggingSettings)

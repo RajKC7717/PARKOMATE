@@ -7,6 +7,7 @@ from parkomate.data.repositories.devices import DeviceRepo
 from parkomate.data.repositories.operators import OperatorRepo
 from parkomate.data.repositories.outbox import OutboxRepo
 from parkomate.data.repositories.sessions import SessionRepo
+from parkomate.data.repositories.transitions import TransitionRepo
 
 __all__ = [
     "AuditRepo",
@@ -16,4 +17,5 @@ __all__ = [
     "OperatorRepo",
     "OutboxRepo",
     "SessionRepo",
+    "TransitionRepo",
 ]

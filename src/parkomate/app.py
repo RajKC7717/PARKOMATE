@@ -1,14 +1,23 @@
 """Composition root: builds every service once and wires them together.
 
-The UI receives an :class:`AppContext` and never constructs services itself. The full build
-(Prompt 3) adds the real HardwareService / WorkflowService here, selected by
-``dev.use_mock_hardware`` or the ``--mock`` flag.
+The UI receives an :class:`AppContext` and never constructs services itself.
+
+Hardware selection (first match wins):
+1. ``hardware=`` argument (tests, screenshot driver);
+2. ``PARKOMATE_REPLAY=<file.jsonl>`` - replay a recorded bench session;
+3. ``--mock`` / ``dev.use_mock_hardware = true`` - simulated bench;
+4. otherwise the real bench (:class:`~parkomate.hardware.RealHardwareService`).
+
+``PARKOMATE_RECORD=<file.jsonl>`` additionally records every hardware call (real or mock).
 """
 
 from __future__ import annotations
 
 import logging
+import os
+from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 
 from parkomate.app_paths import AppPaths
 from parkomate.auth.service import AuthService
@@ -16,11 +25,15 @@ from parkomate.config.manager import SettingsManager
 from parkomate.config.secrets import KeyringSecretStore, SecretStore
 from parkomate.config.settings import Settings
 from parkomate.core.clock import Clock, SystemClock
-from parkomate.core.errors import SettingsError
 from parkomate.core.events import EventBus, SettingsReloaded
 from parkomate.core.interfaces import HardwareService, WorkflowService
 from parkomate.data import Database, Repositories, open_database
 from parkomate.data.records import ProductionRecords
+from parkomate.hardware import (
+    RealHardwareService,
+    RecordingHardwareService,
+    ReplayHardwareService,
+)
 from parkomate.hardware.mocks import (
     MockHardwareService,
     resolve_delay_scale,
@@ -34,7 +47,7 @@ from parkomate.mail.outbox import OutboxService
 from parkomate.mail.reporting import SessionReporter
 from parkomate.reports.exporter import ReportExporter
 from parkomate.station import Station
-from parkomate.workflow.stub import StubWorkflowService
+from parkomate.workflow import WorkflowEngine
 
 log = logging.getLogger(__name__)
 
@@ -70,20 +83,40 @@ class AppContext:
         self.db.close()
 
 
-def create_hardware(settings: Settings, *, mock: bool | None) -> tuple[HardwareService, bool]:
-    use_mock = settings.dev.use_mock_hardware if mock is None else mock
-    if not use_mock:
-        raise SettingsError(
-            "the real hardware service is part of the full build; use mocks for now",
-            problems=[("dev.use_mock_hardware", "real hardware is not available yet - set true")],
+ENV_REPLAY = "PARKOMATE_REPLAY"
+ENV_RECORD = "PARKOMATE_RECORD"
+
+
+def create_hardware(
+    settings: Callable[[], Settings],
+    secrets: SecretStore,
+    *,
+    mock: bool | None,
+) -> tuple[HardwareService, bool]:
+    """Pick the hardware service. Returns ``(service, is_simulated)``."""
+    current = settings()
+    replay = os.environ.get(ENV_REPLAY)
+    service: HardwareService
+    if replay:
+        service = ReplayHardwareService.from_file(Path(replay))
+        simulated = True
+        log.info("using REPLAYED hardware from %s", replay)
+    elif current.dev.use_mock_hardware if mock is None else mock:
+        mock_service = MockHardwareService(
+            resolve_scenario(current.dev.mock_scenario),
+            delay_scale=resolve_delay_scale(current.dev.mock_delay_scale),
+            seed=resolve_seed(),
         )
-    service = MockHardwareService(
-        resolve_scenario(settings.dev.mock_scenario),
-        delay_scale=resolve_delay_scale(settings.dev.mock_delay_scale),
-        seed=resolve_seed(),
-    )
-    log.info("using MOCK hardware (scenario %s)", service.scenario.value)
-    return service, True
+        log.info("using MOCK hardware (scenario %s)", mock_service.scenario.value)
+        service, simulated = mock_service, True
+    else:
+        service, simulated = RealHardwareService(settings, secrets), False
+        log.info("using the REAL bench hardware")
+    record = os.environ.get(ENV_RECORD)
+    if record:
+        log.info("recording hardware calls to %s", record)
+        service = RecordingHardwareService(service, Path(record))
+    return service, simulated
 
 
 def build_context(
@@ -133,10 +166,10 @@ def build_context(
     reporter = SessionReporter(repos, exporter, outbox, current)
     station = Station(repos, records, auth, reporter, outbox, current)
     if hardware is None:
-        hardware, using_mocks = create_hardware(settings, mock=mock)
+        hardware, using_mocks = create_hardware(current, secret_store, mock=mock)
     else:
-        using_mocks = isinstance(hardware, MockHardwareService)
-    workflow = StubWorkflowService(records, current, bus)
+        using_mocks = not isinstance(hardware, RealHardwareService)
+    workflow = WorkflowEngine(records, current, bus)
     return AppContext(
         paths=paths,
         settings_manager=manager,

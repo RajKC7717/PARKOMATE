@@ -38,6 +38,7 @@ class ErrorCode(StrEnum):
     # Measurement device (Aditya)
     MEAS_TIMEOUT = "MEAS_TIMEOUT"
     MEAS_BAD_DATA = "MEAS_BAD_DATA"
+    MEAS_LISTEN_FAILED = "MEAS_LISTEN_FAILED"
     # Camera / identity (Aditya + Piyush)
     CAM_NOT_FOUND = "CAM_NOT_FOUND"
     QR_UNREADABLE = "QR_UNREADABLE"
@@ -99,6 +100,7 @@ _SEVERITY: dict[ErrorCode, Severity] = {
     ErrorCode.FW_NOT_LOADED: Severity.ERROR,
     ErrorCode.MEAS_TIMEOUT: Severity.WARNING,
     ErrorCode.MEAS_BAD_DATA: Severity.ERROR,
+    ErrorCode.MEAS_LISTEN_FAILED: Severity.CRITICAL,
     ErrorCode.CAM_NOT_FOUND: Severity.ERROR,
     ErrorCode.QR_UNREADABLE: Severity.WARNING,
     ErrorCode.QR_BAD_FORMAT: Severity.WARNING,

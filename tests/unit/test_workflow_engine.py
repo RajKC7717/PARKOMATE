@@ -1,4 +1,4 @@
-"""Workflow stub: stage order, gates, limits (incl. edge values), reject/retry/complete."""
+"""Workflow engine: stage order, gates, limits (incl. edge values), reject/retry/complete."""
 
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ from parkomate.core.events import (
 from parkomate.core.interfaces import WorkflowService
 from parkomate.core.models import Measurement
 from parkomate.data.records import ProductionRecords
-from parkomate.workflow.stub import StubWorkflowService, quantize, within
+from parkomate.workflow import WorkflowEngine, quantize, within
 
 MAC = "24:6F:28:AA:BB:01"
 
@@ -52,19 +52,19 @@ def settings_box() -> dict[str, Settings]:
 
 
 @pytest.fixture
-def wf(open_session: ProductionRecords, settings_box: dict[str, Settings]) -> StubWorkflowService:
+def wf(open_session: ProductionRecords, settings_box: dict[str, Settings]) -> WorkflowEngine:
     open_session.record_ambient(27.0, AmbientReason.SESSION_START)
-    return StubWorkflowService(open_session, lambda: settings_box["value"])
+    return WorkflowEngine(open_session, lambda: settings_box["value"])
 
 
-def _programming(wf: StubWorkflowService) -> None:
+def _programming(wf: WorkflowEngine) -> None:
     wf.start_device(MAC)
     wf.submit_check(CheckCode.A_WHITELIST, True)
     wf.submit_check(CheckCode.A_UPLOAD, True, text="2.3.1")
     assert wf.submit_and_next() is Stage.TESTING
 
 
-def _testing_until_measure(wf: StubWorkflowService) -> None:
+def _testing_until_measure(wf: WorkflowEngine) -> None:
     wf.submit_check(CheckCode.B1_COMM, True)
     for i in range(1, 6):
         wf.submit_check(CheckCode.reading(i), 150.0 + i)
@@ -72,7 +72,7 @@ def _testing_until_measure(wf: StubWorkflowService) -> None:
     wf.submit_check(CheckCode.B2_INDICATOR_OK, True)
 
 
-def _to_labeling(wf: StubWorkflowService) -> None:
+def _to_labeling(wf: WorkflowEngine) -> None:
     _programming(wf)
     _testing_until_measure(wf)
     assert all(o.passed for o in wf.evaluate_measurement(_measurement()))
@@ -116,11 +116,11 @@ def test_quantize_decimal_representation() -> None:
 # ------------------------------------------------------------------ flow
 
 
-def test_implements_protocol(wf: StubWorkflowService) -> None:
+def test_implements_protocol(wf: WorkflowEngine) -> None:
     assert isinstance(wf, WorkflowService)
 
 
-def test_happy_path_publishes_events(wf: StubWorkflowService, bus: EventBus) -> None:
+def test_happy_path_publishes_events(wf: WorkflowEngine, bus: EventBus) -> None:
     events: list[Event] = []
     bus.subscribe(Event, events.append)
     _to_labeling(wf)
@@ -150,7 +150,7 @@ def test_happy_path_publishes_events(wf: StubWorkflowService, bus: EventBus) -> 
     assert wf.current_device() is None and wf.current_stage() is Stage.PROGRAMMING
 
 
-def test_gate_blocks_until_complete(wf: StubWorkflowService) -> None:
+def test_gate_blocks_until_complete(wf: WorkflowEngine) -> None:
     wf.start_device(MAC)
     assert wf.missing_checks() == [CheckCode.A_WHITELIST, CheckCode.A_UPLOAD]
     with pytest.raises(RecordStateError) as info:
@@ -173,7 +173,7 @@ def test_gate_blocks_until_complete(wf: StubWorkflowService) -> None:
         wf.start_device("24:6F:28:AA:BB:02")
 
 
-def test_testing_order_enforced(wf: StubWorkflowService) -> None:
+def test_testing_order_enforced(wf: WorkflowEngine) -> None:
     _programming(wf)
     with pytest.raises(RecordStateError):
         wf.submit_check(CheckCode.reading(1), 150.0)  # before B1
@@ -199,7 +199,7 @@ def test_testing_order_enforced(wf: StubWorkflowService) -> None:
 
 
 def test_configurable_reading_count(
-    wf: StubWorkflowService, settings_box: dict[str, Settings]
+    wf: WorkflowEngine, settings_box: dict[str, Settings]
 ) -> None:
     settings_box["value"] = Settings(limits=LimitsSettings(sensor_reading_count=2))
     _programming(wf)
@@ -210,7 +210,7 @@ def test_configurable_reading_count(
     assert CheckCode.reading(3) not in wf.required_checks(Stage.TESTING)
 
 
-def test_whitelist_denied_rejects_at_programming(wf: StubWorkflowService, bus: EventBus) -> None:
+def test_whitelist_denied_rejects_at_programming(wf: WorkflowEngine, bus: EventBus) -> None:
     rejected: list[DeviceRejected] = []
     bus.subscribe(DeviceRejected, rejected.append)
     wf.start_device(MAC)
@@ -226,7 +226,7 @@ def test_whitelist_denied_rejects_at_programming(wf: StubWorkflowService, bus: E
     assert device.reject_reason == f"MAC {MAC} is not authorised by the server"
 
 
-def test_upload_retry_then_success_and_adjust(wf: StubWorkflowService) -> None:
+def test_upload_retry_then_success_and_adjust(wf: WorkflowEngine) -> None:
     wf.start_device(MAC)
     wf.submit_check(CheckCode.A_WHITELIST, True)
     first = wf.submit_check(CheckCode.A_UPLOAD, False, text="HW_FLASH_FAILED")
@@ -249,7 +249,7 @@ def test_upload_retry_then_success_and_adjust(wf: StubWorkflowService) -> None:
 
 
 def test_upload_max_retries_rejects(
-    wf: StubWorkflowService, settings_box: dict[str, Settings]
+    wf: WorkflowEngine, settings_box: dict[str, Settings]
 ) -> None:
     settings_box["value"] = Settings(programming=ProgrammingSettings(max_retries=2))
     wf.start_device(MAC)
@@ -263,7 +263,7 @@ def test_upload_max_retries_rejects(
     assert [e.event for e in events] == [CounterEvent.UPLOAD_FAILURE] * 2
 
 
-def test_operator_rejects_after_failed_upload(wf: StubWorkflowService) -> None:
+def test_operator_rejects_after_failed_upload(wf: WorkflowEngine) -> None:
     wf.start_device(MAC)
     wf.submit_check(CheckCode.A_WHITELIST, True)
     wf.submit_check(CheckCode.A_UPLOAD, False)
@@ -273,13 +273,13 @@ def test_operator_rejects_after_failed_upload(wf: StubWorkflowService) -> None:
     assert [c.check_code for c in checks].count(CheckCode.A_UPLOAD) == 1  # not double-recorded
 
 
-def test_comm_failure_rejects(wf: StubWorkflowService) -> None:
+def test_comm_failure_rejects(wf: WorkflowEngine) -> None:
     _programming(wf)
     outcome = wf.submit_check(CheckCode.B1_COMM, False)
     assert outcome.reject is not None and outcome.reject.box_letter == "B"
 
 
-def test_operator_marks_sensor_failed(wf: StubWorkflowService) -> None:
+def test_operator_marks_sensor_failed(wf: WorkflowEngine) -> None:
     _programming(wf)
     wf.submit_check(CheckCode.B1_COMM, True)
     for i in range(1, 6):
@@ -289,7 +289,7 @@ def test_operator_marks_sensor_failed(wf: StubWorkflowService) -> None:
     assert outcome.reject.reason_params["check_key"] == "check.B2_SENSOR_OK"
 
 
-def test_point_c_out_of_range_rejects_with_reason(wf: StubWorkflowService) -> None:
+def test_point_c_out_of_range_rejects_with_reason(wf: WorkflowEngine) -> None:
     _programming(wf)
     _testing_until_measure(wf)
     outcomes = wf.evaluate_measurement(_measurement(v_c=3.21))
@@ -310,7 +310,7 @@ def test_point_c_out_of_range_rejects_with_reason(wf: StubWorkflowService) -> No
     ("t_reg", "passes"),
     [(30.0, True), (30.004, True), (30.01, False), (31.5, False)],
 )
-def test_regulator_temperature_margin(wf: StubWorkflowService, t_reg: float, passes: bool) -> None:
+def test_regulator_temperature_margin(wf: WorkflowEngine, t_reg: float, passes: bool) -> None:
     _programming(wf)
     _testing_until_measure(wf)
     outcomes = wf.evaluate_measurement(_measurement(t_reg_c=t_reg))
@@ -322,7 +322,7 @@ def test_regulator_temperature_margin(wf: StubWorkflowService, t_reg: float, pas
         assert temp.reject.reason_key == "reject.reason.temp_too_high"
 
 
-def test_ambient_remeasure_used(wf: StubWorkflowService) -> None:
+def test_ambient_remeasure_used(wf: WorkflowEngine) -> None:
     _programming(wf)
     _testing_until_measure(wf)
     wf._records.record_ambient(28.0, AmbientReason.REMEASURE)
@@ -330,7 +330,7 @@ def test_ambient_remeasure_used(wf: StubWorkflowService) -> None:
     assert all(o.passed for o in outcomes)
 
 
-def test_missing_value_fails(wf: StubWorkflowService) -> None:
+def test_missing_value_fails(wf: WorkflowEngine) -> None:
     _programming(wf)
     _testing_until_measure(wf)
     outcomes = wf.evaluate_measurement(_measurement(v_a=None, t_reg_c=None, t_amb_c=None))
@@ -342,7 +342,7 @@ def test_missing_value_fails(wf: StubWorkflowService) -> None:
 def test_missing_ambient_fails(
     open_session: ProductionRecords, settings_box: dict[str, Settings]
 ) -> None:
-    wf = StubWorkflowService(open_session, lambda: settings_box["value"])
+    wf = WorkflowEngine(open_session, lambda: settings_box["value"])
     _programming(wf)
     _testing_until_measure(wf)
     outcomes = wf.evaluate_measurement(_measurement())
@@ -351,13 +351,13 @@ def test_missing_ambient_fails(
     assert temp.reject.reason_key == "reject.reason.ambient_missing"
 
 
-def test_measurement_outside_testing(wf: StubWorkflowService) -> None:
+def test_measurement_outside_testing(wf: WorkflowEngine) -> None:
     wf.start_device(MAC)
     with pytest.raises(RecordStateError):
         wf.evaluate_measurement(_measurement())
 
 
-def test_identity_write_and_confirm(wf: StubWorkflowService) -> None:
+def test_identity_write_and_confirm(wf: WorkflowEngine) -> None:
     _to_labeling(wf)
     with pytest.raises(RecordStateError):
         wf.reconcile_identity("PKM-000519", "PKM-000000")  # QR not read yet
@@ -375,7 +375,7 @@ def test_identity_write_and_confirm(wf: StubWorkflowService) -> None:
     assert device.id_entry_method is IdEntryMethod.MANUAL
 
 
-def test_identity_write_fails_rejects(wf: StubWorkflowService) -> None:
+def test_identity_write_fails_rejects(wf: WorkflowEngine) -> None:
     _to_labeling(wf)
     wf.submit_check(CheckCode.C_QR_READ, "PKM-000519")
     with pytest.raises(RecordStateError):
@@ -391,7 +391,7 @@ def test_identity_write_fails_rejects(wf: StubWorkflowService) -> None:
     }
 
 
-def test_bad_qr_format_is_retriable(wf: StubWorkflowService) -> None:
+def test_bad_qr_format_is_retriable(wf: WorkflowEngine) -> None:
     _to_labeling(wf)
     outcome = wf.submit_check(CheckCode.C_QR_READ, "bad id!")
     assert outcome.passed is False and outcome.retry_allowed and outcome.reject is None
@@ -402,7 +402,7 @@ def test_bad_qr_format_is_retriable(wf: StubWorkflowService) -> None:
         wf.submit_check(CheckCode.C_ID_SYNC, True)
 
 
-def test_checklist_untick_and_manual_reject(wf: StubWorkflowService) -> None:
+def test_checklist_untick_and_manual_reject(wf: WorkflowEngine) -> None:
     _to_labeling(wf)
     wf.submit_check(CheckCode.C2, True)
     wf.submit_check(CheckCode.C2, False)
@@ -418,7 +418,7 @@ def test_checklist_untick_and_manual_reject(wf: StubWorkflowService) -> None:
     assert wf.missing_checks() == []
 
 
-def test_abandon_and_clear(wf: StubWorkflowService) -> None:
+def test_abandon_and_clear(wf: WorkflowEngine) -> None:
     wf.abandon_device()  # nothing on the bench: harmless
     wf.start_device(MAC)
     with pytest.raises(RecordStateError):

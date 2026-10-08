@@ -31,6 +31,7 @@ from parkomate.core.enums import (
     Stage,
 )
 from parkomate.core.errors import InputError, PermissionDeniedError, RecordStateError
+from parkomate.core.mac import normalise_mac
 from parkomate.core.events import (
     AmbientMeasured,
     CountersChanged,
@@ -49,6 +50,7 @@ from parkomate.core.models import (
     Operator,
     Session,
     SessionSummary,
+    StageTransition,
 )
 from parkomate.data import Repositories
 from parkomate.i18n import tr_message
@@ -57,17 +59,6 @@ log = logging.getLogger(__name__)
 
 RECORD_LANGUAGE = "en"
 """Language of the human-readable ``reject_reason`` stored with a device."""
-
-_MAC_HEX = re.compile(r"^[0-9A-F]{12}$")
-
-
-def normalise_mac(mac: str) -> str:
-    """``24-6f-28-aa-bb-cc`` / ``246F28AABBCC`` -> ``24:6F:28:AA:BB:CC``."""
-    compact = re.sub(r"[\s:\-.]", "", mac).upper()
-    if not _MAC_HEX.match(compact):
-        raise InputError(f"invalid MAC address {mac!r}", params={"value": mac})
-    return ":".join(compact[i : i + 2] for i in range(0, 12, 2))
-
 
 class ProductionRecords:
     def __init__(
@@ -339,6 +330,22 @@ class ProductionRecords:
         )
         self._publish_counters()
         return device
+
+    def record_transition(
+        self, device_row_id: int, from_stage: Stage | None, to_stage: Stage
+    ) -> StageTransition:
+        """Record a stage move of a device of the open session (any device status)."""
+        session = self.require_session()
+        device = self._repos.devices.require(device_row_id)
+        if device.session_id != session.id:
+            raise RecordStateError(
+                f"device row {device_row_id} belongs to another session",
+                context={"device_row_id": device_row_id},
+            )
+        return self._repos.transitions.add(device_row_id, from_stage, to_stage)
+
+    def transitions_for_device(self, device_row_id: int) -> list[StageTransition]:
+        return self._repos.transitions.list_for_device(device_row_id)
 
     def abandon_device(self, device_row_id: int) -> Device:
         with self._lock:

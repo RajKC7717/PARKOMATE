@@ -1,29 +1,33 @@
-"""STUB WorkflowService - a simple reference implementation so the UI can be built and demoed.
+"""WorkflowEngine - the production implementation of ``WorkflowService`` (owner: Piyush).
 
-    >>> THIS IS A STUB. Piyush replaces it with the real state machine in the full build. <<<
+One device at a time through an explicit state machine (:mod:`.transitions`):
 
-It already enforces the essentials of the specification:
+    PROGRAMMING → TESTING → LABELING → PACKAGING → COMPLETE,  any → REJECTED
 
-* stage order PROGRAMMING -> TESTING -> LABELING -> PACKAGING -> COMPLETE, any -> REJECTED;
-* gates: A = whitelist allowed + upload success; B = comm OK + N readings + sensor OK +
-  indicator OK + V_A/V_B/V_C in limits + (T_reg - ambient) <= margin; C = C1-C4 ticked +
-  QR read + identity reconciled; D = D1-D4 ticked;
-* limits from settings, inclusive, values rounded half-up to ``limits.decimals``;
-* only programming is retriable (up to ``programming.max_retries`` attempts); every other
-  failure rejects the device immediately;
-* every result is persisted through :class:`~parkomate.data.records.ProductionRecords` and
-  published on the event bus.
+Stage gates
+* A: whitelist allowed AND firmware upload succeeded.
+* B: communication OK, exactly N readings, sensor marked OK, indicator marked OK,
+  V_A / V_B / V_C within limits and (T_reg − ambient) ≤ margin.
+* C: C1–C4 ticked, QR read and identity reconciled (match, or written + read back).
+* D: D1–D4 ticked → COMPLETE.
+
+Rules
+* Validation is pure (:mod:`.validation`); retries follow :mod:`.policy`.
+* Every result, stage transition, reject and completion is persisted through
+  :class:`~parkomate.data.records.ProductionRecords` and published on the event bus
+  (``DeviceStarted``, ``StageChanged``, ``CheckRecorded``, ``DeviceCompleted``,
+  ``DeviceRejected``).
+* A final failure rejects **inside the call**; the returned outcome carries ``reject`` with
+  the stage, check, measured value, limits, i18n reason and the reject-box instruction.
 """
 
 from __future__ import annotations
 
 import logging
-import re
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
-from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
 from parkomate.config.settings import Settings
@@ -56,44 +60,31 @@ from parkomate.core.models import (
     RejectInstruction,
 )
 from parkomate.data.records import ProductionRecords
+from parkomate.workflow.policy import RetryPolicy
+from parkomate.workflow.transitions import ORDER, check_transition, next_stage
+from parkomate.workflow.validation import (
+    id_format_ok,
+    ids_match,
+    measurement_verdicts,
+    quantize,
+)
 
 log = logging.getLogger(__name__)
 
-_NEXT_STAGE: dict[Stage, Stage] = {
-    Stage.PROGRAMMING: Stage.TESTING,
-    Stage.TESTING: Stage.LABELING,
-    Stage.LABELING: Stage.PACKAGING,
-    Stage.PACKAGING: Stage.COMPLETE,
-}
-_ORDER: tuple[Stage, ...] = (
-    Stage.PROGRAMMING,
-    Stage.TESTING,
-    Stage.LABELING,
-    Stage.PACKAGING,
-    Stage.COMPLETE,
-)
-_CHECKLISTS = frozenset(LABELING_CHECKLIST + PACKAGING_CHECKLIST)
-
-
-def quantize(value: float, decimals: int) -> Decimal:
-    """Round half-up on the *decimal* representation (3.245 -> 3.25 at 2 decimals)."""
-    return Decimal(repr(value)).quantize(Decimal(1).scaleb(-decimals), rounding=ROUND_HALF_UP)
-
-
-def within(value: float, low: float, high: float, decimals: int) -> bool:
-    """Inclusive limit check after rounding all three numbers to ``decimals``."""
-    rounded = quantize(value, decimals)
-    return quantize(low, decimals) <= rounded <= quantize(high, decimals)
+CHECKLISTS = frozenset(LABELING_CHECKLIST + PACKAGING_CHECKLIST)
+ELECTRICAL_CODES = (CheckCode.B3_V_A, CheckCode.B3_V_B, CheckCode.B3_V_C, CheckCode.B3_T_REG)
 
 
 @dataclass(slots=True)
 class _Active:
+    """Mutable state of the device on the bench (snapshots go out as ``DeviceState``)."""
+
     device_row_id: int
     mac_address: str
     started_at: datetime
     stage: Stage = Stage.PROGRAMMING
     status: DeviceStatus = DeviceStatus.IN_PROGRESS
-    upload_attempts: int = 0
+    attempts: dict[CheckCode, int] = field(default_factory=dict)
     upload_failures: int = 0
     readings: list[float] = field(default_factory=list)
     marks: dict[CheckCode, bool] = field(default_factory=dict)
@@ -103,9 +94,13 @@ class _Active:
     identity: IdentityStatus | None = None
     reject: RejectInstruction | None = None
 
+    def bump(self, code: CheckCode) -> int:
+        self.attempts[code] = self.attempts.get(code, 0) + 1
+        return self.attempts[code]
 
-class StubWorkflowService:
-    """STUB implementation of :class:`parkomate.core.interfaces.WorkflowService`."""
+
+class WorkflowEngine:
+    """Production ``WorkflowService``."""
 
     def __init__(
         self,
@@ -119,6 +114,13 @@ class StubWorkflowService:
         self._lock = threading.RLock()
         self._active: _Active | None = None
 
+    @property
+    def records(self) -> ProductionRecords:
+        return self._records
+
+    def _policy(self) -> RetryPolicy:
+        return RetryPolicy(self._settings())
+
     # ================================================================== lifecycle
     def start_device(self, mac: str) -> DeviceState:
         with self._lock:
@@ -127,6 +129,7 @@ class StubWorkflowService:
             row_id = self._records.start_device(mac)
             device = self._records.get_device(row_id)
             self._active = _Active(row_id, device.mac_address, device.started_at)
+            self._records.record_transition(row_id, None, Stage.PROGRAMMING)
             snapshot = self._snapshot()
         self._bus.publish(DeviceStarted(row_id, device.mac_address))
         assert snapshot is not None
@@ -143,11 +146,9 @@ class StubWorkflowService:
     def abandon_device(self) -> None:
         with self._lock:
             active = self._active
-            if active is None or active.status is not DeviceStatus.IN_PROGRESS:
-                self._active = None
-                return
-            self._records.abandon_device(active.device_row_id)
             self._active = None
+            if active is not None and active.status is DeviceStatus.IN_PROGRESS:
+                self._records.abandon_device(active.device_row_id)
 
     def clear_finished(self) -> None:
         with self._lock:
@@ -166,10 +167,7 @@ class StubWorkflowService:
                 *(CheckCode.reading(i) for i in range(1, count + 1)),
                 CheckCode.B2_SENSOR_OK,
                 CheckCode.B2_INDICATOR_OK,
-                CheckCode.B3_V_A,
-                CheckCode.B3_V_B,
-                CheckCode.B3_V_C,
-                CheckCode.B3_T_REG,
+                *ELECTRICAL_CODES,
             ]
         if stage is Stage.LABELING:
             return [*LABELING_CHECKLIST, CheckCode.C_QR_READ, CheckCode.C_ID_SYNC]
@@ -177,8 +175,9 @@ class StubWorkflowService:
             return list(PACKAGING_CHECKLIST)
         return []
 
-    def _satisfied(self, active: _Active, code: CheckCode) -> bool:
-        if code in _CHECKLISTS:
+    @staticmethod
+    def _satisfied(active: _Active, code: CheckCode) -> bool:
+        if code in CHECKLISTS:
             return active.marks.get(code) is True
         outcome = active.outcomes.get(code)
         if outcome is None:
@@ -192,21 +191,18 @@ class StubWorkflowService:
             active = self._active
             if active is None or active.status is not DeviceStatus.IN_PROGRESS:
                 return []
-            return [c for c in self.required_checks(active.stage) if not self._satisfied(active, c)]
+            return [
+                c for c in self.required_checks(active.stage) if not self._satisfied(active, c)
+            ]
 
     def is_stage_complete(self, stage: Stage) -> bool:
         with self._lock:
             active = self._active
-            if active is None or stage not in _ORDER:
+            if active is None or stage not in ORDER or active.status is DeviceStatus.REJECTED:
                 return False
-            if active.status is DeviceStatus.REJECTED:
-                return False
-            current = _ORDER.index(active.stage)
-            target = _ORDER.index(stage)
-            if target < current:
-                return True
-            if target > current:
-                return False
+            current, target = ORDER.index(active.stage), ORDER.index(stage)
+            if target != current:
+                return target < current
             return all(self._satisfied(active, c) for c in self.required_checks(stage))
 
     def can_submit(self) -> bool:
@@ -228,26 +224,18 @@ class StubWorkflowService:
                 raise RecordStateError(
                     f"{check_code.value} cannot be submitted during {active.stage.value}"
                 )
-            if check_code in (
-                CheckCode.B3_V_A,
-                CheckCode.B3_V_B,
-                CheckCode.B3_V_C,
-                CheckCode.B3_T_REG,
-                CheckCode.B3_T_AMB,
-            ):
+            if check_code in (*ELECTRICAL_CODES, CheckCode.B3_T_AMB):
                 raise RecordStateError("electrical checks go through evaluate_measurement()")
             if check_code is CheckCode.C_ID_SYNC:
                 raise RecordStateError("identity goes through reconcile_identity()")
-            if check_code in _CHECKLISTS:
+            if check_code in CHECKLISTS:
                 return self._tick(active, check_code, _as_bool(value, check_code))
             if check_code is CheckCode.A_WHITELIST:
                 return self._whitelist(active, _as_bool(value, check_code), text)
             if check_code is CheckCode.A_UPLOAD:
                 return self._upload(active, _as_bool(value, check_code), text)
             if check_code is CheckCode.B1_COMM:
-                return self._simple_auto(
-                    active, check_code, _as_bool(value, check_code), "reject.reason.comm_failed"
-                )
+                return self._comm(active, _as_bool(value, check_code), text)
             if check_code.reading_index is not None:
                 return self._reading(active, check_code, value)
             if check_code in (CheckCode.B2_SENSOR_OK, CheckCode.B2_INDICATOR_OK):
@@ -261,12 +249,8 @@ class StubWorkflowService:
         return CheckOutcome(check_code=code, stage=code.stage, passed=ticked)
 
     def _whitelist(self, active: _Active, allowed: bool, text: str | None) -> CheckOutcome:
-        outcome = self._record(
-            active,
-            CheckCode.A_WHITELIST,
-            passed=allowed,
-            value_text=active.mac_address if not text else f"{active.mac_address} | {text}",
-        )
+        detail = active.mac_address if not text else f"{active.mac_address} | {text}"
+        outcome = self._record(active, CheckCode.A_WHITELIST, passed=allowed, value_text=detail)
         if not allowed:
             return self._fail(
                 active, outcome, "reject.reason.whitelist_denied", {"mac": active.mac_address}
@@ -274,47 +258,53 @@ class StubWorkflowService:
         return outcome
 
     def _upload(self, active: _Active, success: bool, text: str | None) -> CheckOutcome:
-        whitelist = active.outcomes.get(CheckCode.A_WHITELIST)
-        if whitelist is None or whitelist.passed is not True:
+        if not self._satisfied(active, CheckCode.A_WHITELIST):
             raise RecordStateError("whitelist must pass before uploading")
         if self._satisfied(active, CheckCode.A_UPLOAD):
             raise RecordStateError("firmware already uploaded")
-        max_attempts = self._settings().programming.max_retries
-        if active.upload_attempts >= max_attempts:
+        policy = self._policy()
+        max_attempts = policy.max_attempts(CheckCode.A_UPLOAD)
+        if active.attempts.get(CheckCode.A_UPLOAD, 0) >= max_attempts:
             raise RecordStateError("no upload attempts left")
-        active.upload_attempts += 1
+        attempt = active.bump(CheckCode.A_UPLOAD)
         event = CounterEvent.UPLOAD_SUCCESS if success else CounterEvent.UPLOAD_FAILURE
         self._records.counter_event(event, active.device_row_id)
         if success and text:
             self._records.set_device_firmware(active.device_row_id, text)
         if not success:
             active.upload_failures += 1
-        retry = not success and active.upload_attempts < max_attempts
+        retry = not success and policy.retry_allowed(CheckCode.A_UPLOAD, attempt)
         outcome = self._record(
             active,
             CheckCode.A_UPLOAD,
             passed=success,
             value_text=text,
-            attempt=active.upload_attempts,
+            attempt=attempt,
             max_attempts=max_attempts,
             retry_allowed=retry,
             reason_key=None if success else "reject.reason.upload_failed",
         )
         if not success and not retry:
-            return self._fail(
-                active,
-                outcome,
-                "reject.reason.upload_failed_max",
-                {"attempts": active.upload_attempts},
-            )
+            key = "reject.reason.upload_failed_max" if max_attempts > 1 else "reject.reason.upload_failed"
+            return self._fail(active, outcome, key, {"attempts": attempt})
         return outcome
 
-    def _simple_auto(
-        self, active: _Active, code: CheckCode, passed: bool, reason_key: str
-    ) -> CheckOutcome:
-        outcome = self._record(active, code, passed=passed)
-        if not passed:
-            return self._fail(active, outcome, reason_key, {})
+    def _comm(self, active: _Active, ok: bool, text: str | None) -> CheckOutcome:
+        policy = self._policy()
+        attempt = active.bump(CheckCode.B1_COMM)
+        retry = not ok and policy.retry_allowed(CheckCode.B1_COMM, attempt)
+        outcome = self._record(
+            active,
+            CheckCode.B1_COMM,
+            passed=ok,
+            value_text=text,
+            attempt=attempt,
+            max_attempts=policy.max_attempts(CheckCode.B1_COMM),
+            retry_allowed=retry,
+            reason_key=None if ok else "reject.reason.comm_failed",
+        )
+        if not ok and not retry:
+            return self._fail(active, outcome, "reject.reason.comm_failed", {})
         return outcome
 
     def _reading(self, active: _Active, code: CheckCode, value: CheckValue) -> CheckOutcome:
@@ -340,7 +330,10 @@ class StubWorkflowService:
         outcome = self._record(active, code, passed=ok, operator_marked=True)
         if not ok:
             return self._fail(
-                active, outcome, "reject.reason.operator_marked_fail", {"check_key": code.label_key}
+                active,
+                outcome,
+                "reject.reason.operator_marked_fail",
+                {"check_key": code.label_key},
             )
         return outcome
 
@@ -348,9 +341,8 @@ class StubWorkflowService:
         if not isinstance(value, str) or not value.strip():
             raise InputError("C_QR_READ needs the decoded ID text")
         qr = value.strip()
-        pattern = self._settings().camera.id_pattern
-        if not re.fullmatch(pattern, qr):
-            # A badly formatted label is not a device fault: record it and let them rescan.
+        if not id_format_ok(qr, self._settings().camera.id_pattern):
+            # A wrong label is not a device fault: record it and let the operator rescan.
             return self._record(
                 active,
                 CheckCode.C_QR_READ,
@@ -371,24 +363,26 @@ class StubWorkflowService:
             missing = self.missing_checks()
             if missing:
                 raise RecordStateError(
-                    "stage gate not satisfied",
-                    context={"missing": [c.value for c in missing]},
+                    "stage gate not satisfied", context={"missing": [c.value for c in missing]}
                 )
             old = active.stage
+            new = next_stage(old)
+            check_transition(old, new)
             if old in (Stage.LABELING, Stage.PACKAGING):
                 checklist = LABELING_CHECKLIST if old is Stage.LABELING else PACKAGING_CHECKLIST
                 for code in checklist:
                     self._record(active, code, passed=True, operator_marked=True, publish=False)
-            new = _NEXT_STAGE[old]
-            active.stage = new
             if new is Stage.COMPLETE:
                 self._records.complete_device(active.device_row_id)
                 active.status = DeviceStatus.COMPLETE
+            self._records.record_transition(active.device_row_id, old, new)
+            active.stage = new
             device_id = active.device_id
-        self._bus.publish(StageChanged(active.device_row_id, old, new))
+            row_id = active.device_row_id
+        self._bus.publish(StageChanged(row_id, old, new))
         if new is Stage.COMPLETE:
-            self._bus.publish(DeviceCompleted(active.device_row_id, device_id))
-        log.info("device row %d: %s -> %s", active.device_row_id, old.value, new.value)
+            self._bus.publish(DeviceCompleted(row_id, device_id))
+        log.info("device row %d: %s -> %s", row_id, old.value, new.value)
         return new
 
     def reject(
@@ -405,9 +399,11 @@ class StubWorkflowService:
                 )
             last = active.outcomes.get(check_code)
             if last is None or last.passed is not False:
-                self._record(active, check_code, passed=False, operator_marked=True, publish=False)
+                last = self._record(
+                    active, check_code, passed=False, operator_marked=True, publish=False
+                )
             params: dict[str, Any] = {"check_key": check_code.label_key, **reason_params}
-            return self._do_reject(active, check_code, reason_key, params)
+            return self._do_reject(active, last, reason_key, params)
 
     def can_retry_programming(self) -> bool:
         with self._lock:
@@ -420,7 +416,8 @@ class StubWorkflowService:
             return (
                 last is not None
                 and last.passed is False
-                and active.upload_attempts < self._settings().programming.max_retries
+                and active.attempts.get(CheckCode.A_UPLOAD, 0)
+                < self._policy().max_attempts(CheckCode.A_UPLOAD)
             )
 
     # ================================================================== testing
@@ -437,113 +434,45 @@ class StubWorkflowService:
                 and active.marks.get(CheckCode.B2_INDICATOR_OK) is True
             ):
                 raise RecordStateError("finish B1 and B2 before measuring")
-            limits = self._settings().limits
-            decimals = limits.decimals
-            outcomes: list[CheckOutcome] = []
-            first_fail: tuple[CheckOutcome, str, dict[str, Any]] | None = None
-
-            for point, code in (
-                ("a", CheckCode.B3_V_A),
-                ("b", CheckCode.B3_V_B),
-                ("c", CheckCode.B3_V_C),
-            ):
-                low, high = limits.voltage_range(point)
-                raw = getattr(measurement, f"v_{point}")
-                if raw is None:
-                    outcome = self._record(
-                        active,
-                        code,
-                        passed=False,
-                        limits=(low, high),
-                        reason_key="reject.reason.value_missing",
-                        reason_params={"check_key": code.label_key},
-                    )
-                    params: dict[str, Any] = {"check_key": code.label_key}
-                    reason = "reject.reason.value_missing"
-                else:
-                    value = float(quantize(raw, decimals))
-                    passed = within(raw, low, high, decimals)
-                    params = {
-                        "check_key": code.label_key,
-                        "value": f"{value:.{decimals}f}",
-                        "unit": "V",
-                        "low": f"{low:.{decimals}f}",
-                        "high": f"{high:.{decimals}f}",
-                    }
-                    reason = "reject.reason.out_of_range"
-                    outcome = self._record(
-                        active,
-                        code,
-                        passed=passed,
-                        value_num=value,
-                        limits=(low, high),
-                        reason_key=None if passed else reason,
-                        reason_params=params,
-                    )
-                outcomes.append(outcome)
-                if outcome.passed is False and first_fail is None:
-                    first_fail = (outcome, reason, params)
-
+            settings = self._settings()
+            policy = RetryPolicy(settings)
             ambient_reading = self._records.latest_ambient()
             ambient = ambient_reading.value_c if ambient_reading else None
-            margin = limits.temp_margin_c
-            t_reg = measurement.t_reg_c
-            code = CheckCode.B3_T_REG
-            if t_reg is None or ambient is None:
-                reason = (
-                    "reject.reason.value_missing"
-                    if t_reg is None
-                    else "reject.reason.ambient_missing"
+            verdicts = measurement_verdicts(measurement, settings.limits, ambient)
+            attempt = active.bump(CheckCode.B3_V_A)  # one counter for the whole measurement
+            any_failed = any(not v.passed for v in verdicts)
+            retry = any_failed and policy.retry_allowed(CheckCode.B3_V_A, attempt)
+            outcomes: list[CheckOutcome] = []
+            for verdict in verdicts:
+                outcomes.append(
+                    self._record(
+                        active,
+                        verdict.check_code,
+                        passed=verdict.passed,
+                        value_num=verdict.value,
+                        value_text=verdict.detail,
+                        limits=(verdict.low, verdict.high),
+                        reason_key=verdict.reason_key,
+                        reason_params=verdict.params,
+                        attempt=attempt,
+                        max_attempts=policy.max_attempts(CheckCode.B3_V_A),
+                        retry_allowed=retry and not verdict.passed,
+                    )
                 )
-                params = {"check_key": code.label_key}
-                outcome = self._record(
-                    active,
-                    code,
-                    passed=False,
-                    value_num=None if t_reg is None else float(quantize(t_reg, decimals)),
-                    reason_key=reason,
-                    reason_params=params,
-                )
-            else:
-                rise = float(quantize(t_reg - ambient, decimals))
-                limit = float(quantize(ambient + margin, decimals))
-                passed = quantize(t_reg - ambient, decimals) <= quantize(margin, decimals)
-                value = float(quantize(t_reg, decimals))
-                reason = "reject.reason.temp_too_high"
-                params = {
-                    "check_key": code.label_key,
-                    "value": f"{value:.{decimals}f}",
-                    "ambient": f"{ambient:.1f}",
-                    "margin": f"{margin:g}",
-                    "limit": f"{limit:.{decimals}f}",
-                    "rise": f"{rise:.{decimals}f}",
-                }
-                outcome = self._record(
-                    active,
-                    code,
-                    passed=passed,
-                    value_num=value,
-                    limits=(None, limit),
-                    value_text=f"rise {rise:.{decimals}f} °C over ambient {ambient:.1f} °C",
-                    reason_key=None if passed else reason,
-                    reason_params=params,
-                )
-            outcomes.append(outcome)
-            if outcome.passed is False and first_fail is None:
-                first_fail = (outcome, reason, params)
-
             if measurement.t_amb_c is not None:
                 self._record(
                     active,
                     CheckCode.B3_T_AMB,
                     passed=None,
-                    value_num=float(quantize(measurement.t_amb_c, decimals)),
+                    value_num=float(quantize(measurement.t_amb_c, settings.limits.decimals)),
                 )
-
-            if first_fail is not None:
-                failed_outcome, reason, params = first_fail
-                rejected = self._fail(active, failed_outcome, reason, params)
-                outcomes = [rejected if o is failed_outcome else o for o in outcomes]
+            if any_failed and not retry:
+                index, first = next(
+                    (i, o) for i, o in enumerate(outcomes) if o.passed is False
+                )
+                verdict = verdicts[index]
+                assert verdict.reason_key is not None
+                outcomes[index] = self._fail(active, first, verdict.reason_key, verdict.params)
             return outcomes
 
     # ================================================================== labeling
@@ -564,24 +493,16 @@ class StubWorkflowService:
                 raise RecordStateError("read the QR code first")
             current = (device_id or "").strip()
             if not after_write:
-                if current == qr:
-                    self._records.set_device_id(active.device_row_id, qr, method)
-                    active.device_id = qr
-                    active.identity = IdentityStatus.MATCH
-                    self._record(active, CheckCode.C_ID_SYNC, passed=True, value_text=f"match {qr}")
-                    return IdentityOutcome(status=IdentityStatus.MATCH, qr_id=qr, device_id=current)
+                if ids_match(qr, current):
+                    return self._identity_ok(active, qr, method, IdentityStatus.MATCH, "match")
                 active.identity = IdentityStatus.WRITE_REQUIRED
                 return IdentityOutcome(
                     status=IdentityStatus.WRITE_REQUIRED, qr_id=qr, device_id=current or None
                 )
             if active.identity is not IdentityStatus.WRITE_REQUIRED:
                 raise RecordStateError("no ID write was requested")
-            if current == qr:
-                self._records.set_device_id(active.device_row_id, qr, method)
-                active.device_id = qr
-                active.identity = IdentityStatus.CONFIRMED
-                self._record(active, CheckCode.C_ID_SYNC, passed=True, value_text=f"written {qr}")
-                return IdentityOutcome(status=IdentityStatus.CONFIRMED, qr_id=qr, device_id=current)
+            if ids_match(qr, current):
+                return self._identity_ok(active, qr, method, IdentityStatus.CONFIRMED, "written")
             active.identity = IdentityStatus.FAILED
             params = {"qr": qr, "device": current or "-"}
             outcome = self._record(
@@ -599,6 +520,15 @@ class StubWorkflowService:
                 device_id=current or None,
                 reject=rejected.reject,
             )
+
+    def _identity_ok(
+        self, active: _Active, qr: str, method: IdEntryMethod, status: IdentityStatus, word: str
+    ) -> IdentityOutcome:
+        self._records.set_device_id(active.device_row_id, qr, method)
+        active.device_id = qr
+        active.identity = status
+        self._record(active, CheckCode.C_ID_SYNC, passed=True, value_text=f"{word} {qr}")
+        return IdentityOutcome(status=status, qr_id=qr, device_id=qr)
 
     # ================================================================== internals
     def _require_active(self) -> _Active:
@@ -661,7 +591,7 @@ class StubWorkflowService:
         self, active: _Active, outcome: CheckOutcome, reason_key: str, params: dict[str, Any]
     ) -> CheckOutcome:
         full = {"check_key": outcome.check_code.label_key, **params}
-        instruction = self._do_reject(active, outcome.check_code, reason_key, full)
+        instruction = self._do_reject(active, outcome, reason_key, full)
         rejected = outcome.model_copy(
             update={"reject": instruction, "reason_key": reason_key, "reason_params": full}
         )
@@ -669,22 +599,35 @@ class StubWorkflowService:
         return rejected
 
     def _do_reject(
-        self, active: _Active, code: CheckCode, reason_key: str, params: dict[str, Any]
+        self,
+        active: _Active,
+        outcome: CheckOutcome,
+        reason_key: str,
+        params: dict[str, Any],
     ) -> RejectInstruction:
         stage = active.stage
+        check_transition(stage, Stage.REJECTED)
+        code = outcome.check_code
         self._records.reject_device(active.device_row_id, stage, code, reason_key, params)
+        self._records.record_transition(active.device_row_id, stage, Stage.REJECTED)
         instruction = RejectInstruction(
             device_row_id=active.device_row_id,
             stage=stage,
             check_code=code,
             reason_key=reason_key,
             reason_params=params,
+            value_num=outcome.value_num,
+            value_text=outcome.value_text,
+            unit=outcome.unit,
+            limit_low=outcome.limit_low,
+            limit_high=outcome.limit_high,
         )
         active.status = DeviceStatus.REJECTED
         active.stage = Stage.REJECTED
         active.reject = instruction
         self._bus.publish(StageChanged(active.device_row_id, stage, Stage.REJECTED))
         self._bus.publish(DeviceRejected(active.device_row_id, instruction))
+        log.info("device row %d rejected at %s (%s)", active.device_row_id, stage.value, code.value)
         return instruction
 
     def _snapshot(self) -> DeviceState | None:
@@ -699,7 +642,7 @@ class StubWorkflowService:
             stage=active.stage,
             status=active.status,
             started_at=active.started_at,
-            upload_attempts=active.upload_attempts,
+            upload_attempts=active.attempts.get(CheckCode.A_UPLOAD, 0),
             upload_failures=active.upload_failures,
             readings=list(active.readings),
             marks=dict(active.marks),

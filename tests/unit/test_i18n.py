@@ -133,3 +133,24 @@ def test_language_switch_notifies() -> None:
 
 def test_languages_constant() -> None:
     assert LANGUAGES == ("en", "mr")
+
+
+def test_every_setting_has_a_label_and_section() -> None:
+    from pydantic import BaseModel
+
+    from parkomate.config.settings import Settings
+
+    missing = []
+    for section, info in Settings.model_fields.items():
+        model = info.annotation
+        if isinstance(model, type) and issubclass(model, BaseModel):
+            if f"settings.section.{section}" not in EN:
+                missing.append(f"settings.section.{section}")
+            missing.extend(
+                f"settings.f.{section}.{key}"
+                for key in model.model_fields
+                if f"settings.f.{section}.{key}" not in EN
+            )
+        elif f"settings.f.{section}" not in EN:
+            missing.append(f"settings.f.{section}")
+    assert missing == []

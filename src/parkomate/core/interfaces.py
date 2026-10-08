@@ -1,9 +1,10 @@
 """Contracts between the three owners. See CONTRACTS.md for the prose version.
 
-* :class:`HardwareService` - implemented by **Aditya** (``parkomate.hardware``).
-  Today: ``parkomate.hardware.mocks.MockHardwareService``.
-* :class:`WorkflowService` - implemented by **Piyush** (``parkomate.workflow``).
-  Today: ``parkomate.workflow.stub.StubWorkflowService``.
+* :class:`HardwareService` - implemented by **Aditya** (``parkomate.hardware``):
+  ``RealHardwareService`` on the bench, ``MockHardwareService`` / ``ReplayHardwareService``
+  for development and tests.
+* :class:`WorkflowService` - implemented by **Piyush** (``parkomate.workflow``):
+  ``WorkflowEngine``.
 
 The UI and the data layer depend only on these Protocols, never on the implementations.
 """

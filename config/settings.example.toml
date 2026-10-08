@@ -49,9 +49,37 @@ api_s = 10.0
 # How long one QR scan attempt waits for a readable code, seconds.
 qr_scan_s = 10.0
 
+[serial]
+# Text link to the firmware on the board: PING->PONG, READ_SENSOR->SENSOR <v>, GET_ID->ID <id>,
+# SET_ID <id>->OK, GET_MAC->MAC <mac>. Replies starting with "ERR" are device errors.
+baud = 115200
+# Wait for one reply line, seconds (the communication test uses timeouts.ping_s).
+command_timeout_s = 2.0
+# Extra tries when a reply does not come in time.
+command_retries = 2
+# After flashing/reset the firmware needs this long before it answers, seconds.
+boot_wait_s = 4.0
+# Where the MAC comes from: "esptool" (ROM bootloader, works on blank boards) or "link" (GET_MAC).
+mac_source = "esptool"
+# How often the station checks that the board's USB port is still present, seconds.
+port_check_s = 2.0
+
 [programming]
 # Maximum firmware upload attempts per device, first attempt included (1-10).
 max_retries = 3
+# Serial speed used while flashing.
+flash_baud = 460800
+# "default_reset" (auto-reset boards), "usb_reset" (ESP32-S3/C3 native USB) or
+# "no_reset" (no auto-reset circuit: the screen asks the operator to hold BOOT).
+connect_mode = "default_reset"
+# Flash address of a single application image (server sends one .bin). 65536 = 0x10000.
+app_offset = 65536
+# Used when the server's manifest lists images without offsets: bootloader 4096 = 0x1000
+# (ESP32; 0 for ESP32-S3/C3) and partition table 32768 = 0x8000.
+bootloader_offset = 4096
+partitions_offset = 32768
+# Erase the whole flash before writing (slower; also clears data stored on the board).
+erase_all = false
 
 [server]
 # Parkomate server. Must be https:// (plain http only for localhost development).
@@ -61,6 +89,12 @@ whitelist_path = "/api/v1/devices/whitelist"
 firmware_path = "/api/v1/firmware/latest"
 # NAME of the Credential Manager entry holding the API token (not the token itself).
 api_token_ref = "server_api_token"
+# Check the server's TLS certificate. Never switch off in production.
+verify_tls = true
+# Optional path to a company CA bundle (.pem); empty = system certificates.
+ca_bundle = ""
+# Extra attempts for network errors and HTTP 5xx answers (with back-off).
+retries = 3
 
 [measurement]
 # The app listens here for the measuring device's JSON (POST /measurement).
@@ -68,6 +102,12 @@ listen_host = "0.0.0.0"
 listen_port = 8765
 # Only packets from this IP address are accepted.
 allowed_ip = "192.168.4.2"
+# HTTP path the device POSTs to. JSON body:
+# {"station": "...", "seq": 1, "ts": "...", "v_a": 24.0, "v_b": 5.0, "v_c": 3.3,
+#  "t_reg_c": 28.4, "t_amb_c": 27.1}
+path = "/measurement"
+# Wait this long for a packet with t_amb_c when measuring ambient temperature, seconds.
+ambient_timeout_s = 20.0
 
 [camera]
 # OpenCV camera index of the USB QR camera (0 = first camera).
@@ -76,6 +116,12 @@ index = 0
 allow_manual_entry = false
 # Regular expression a decoded or typed device ID must match.
 id_pattern = "^[A-Za-z0-9-]{4,32}$"
+# OpenCV capture backend: "auto" (DirectShow on Windows), "dshow", "msmf" or "any".
+backend = "auto"
+# Requested camera resolution and frame rate.
+width = 1280
+height = 720
+fps = 15
 
 [email]
 # Send the session summary + report when a session ends.
@@ -113,6 +159,13 @@ format = "xlsx"
 # Language of report headings and of the summary e-mail: "en" or "mr".
 language = "en"
 
+[workflow]
+# Failures that allow another try instead of an immediate reject. Allowed:
+# "A_UPLOAD" (firmware upload), "B1_COMM" (communication test), "B3_ELECTRICAL" (measurement).
+retriable_checks = ["A_UPLOAD"]
+# Attempts for B1_COMM / B3_ELECTRICAL when retriable (upload uses programming.max_retries).
+max_attempts = 3
+
 [auth]
 # Wrong passwords before the account is locked.
 max_failed_attempts = 5
@@ -138,8 +191,8 @@ max_bytes = 5000000
 backup_count = 5
 
 [dev]
-# Use the simulated bench. Real hardware arrives with the full build.
-use_mock_hardware = true
+# Use the simulated bench instead of the real hardware (same as "--mock"). Never in production.
+use_mock_hardware = false
 # Mock scenario; the PARKOMATE_MOCK_SCENARIO environment variable overrides it. One of:
 # all_pass, upload_fails_then_succeeds, upload_always_fails, whitelist_denied,
 # v_c_out_of_range, temp_too_high, measurement_timeout, qr_unreadable, id_differs,
